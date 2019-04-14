@@ -1,0 +1,6 @@
+ENV{ID_MTP_DEVICE}!="1", GOTO="uma_end"
+
+ACTION=="add", RUN+="/bin/sh -c 'systemctl --no-block start uma-mount@$(systemd-escape %p).service'"
+ACTION=="remove", RUN+="/bin/sh -c 'systemctl --no-block stop uma-mount@$(systemd-escape %p).service'"
+
+LABEL="uma_end"

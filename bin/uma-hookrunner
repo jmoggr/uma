@@ -1,0 +1,23 @@
+#!/bin/bash
+
+# <source> uma-hookrunner( <hook-type> )
+# Evaluate the particular type of hooks. Please notice that in order to be able
+# to modify certain environment variables, hooks are being executed through
+# '.' (AKA 'source'). This means they should avoid 'exit', 'exec' and similar
+# calls.
+
+. /etc/opt/uma/uma.conf
+. /opt/uma/bin/uma-common.sh
+
+readonly HOOK_TYPE="${1}"
+DEVPATH="${2}"
+
+# TODO: make sure aggregate runtime does not exceed systemd timeouts
+if [ -d "${HOOK_DIR}"/"${HOOK_TYPE}" ]; then
+    for fn in "${HOOK_DIR}"/"${HOOK_TYPE}"/*; do
+        if [ -f "${fn}" ]; then
+            debug "... ${HOOK_TYPE}: evaluating $(basename "${fn}")"
+            . "${fn}" "${DEVPATH}"
+        fi
+    done
+fi

@@ -1,0 +1,18 @@
+#!/bin/bash
+
+HEADER='ACTION!="remove", GOTO="mtp_remove_rules_end"
+ENV{MAJOR}!="?*", GOTO="mtp_remove_rules_end"
+SUBSYSTEM=="usb", GOTO="mtp_remove_rules"
+GOTO="mtp_remove_rules_end"
+
+LABEL="mtp_remove_rules"
+'
+
+FOOTER='
+LABEL="mtp_remove_rules_end"'
+
+echo "$HEADER"
+
+cat /lib/udev/rules.d/69-libmtp.rules | sed -rn 's/^ATTR\{idVendor\}=="([0-9a-z]{4})", ATTR\{idProduct\}=="([0-9a-z]{4})".*$/ENV\{PRODUCT\}=="\1\/\2\/*", ENV{ID_MTP_DEVICE}="1"/p' | sed -re 's/"0+/"/' -e 's/\/0+/\//'
+
+echo "$FOOTER"

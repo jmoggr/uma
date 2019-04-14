@@ -1,0 +1,5 @@
+#!/bin/bash
+
+DEVPATH="${1}"
+
+debug "Post umount $DEVPATH"

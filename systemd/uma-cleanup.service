@@ -1,0 +1,9 @@
+[Unit]
+Description=Removes unused uma mountpoints
+
+[Service]
+Type=oneshot
+ExecStart=/opt/uma/bin/uma-cleanup
+
+[Install]
+WantedBy=systemd-udevd.service

@@ -1,0 +1,214 @@
+#!/bin/bash
+
+# This script is called from our systemd unit file to mount or unmount an mtp
+# advice
+
+. /etc/opt/uma/uma.conf
+. /opt/uma/bin/uma-common.sh
+
+##
+# Globals:
+# Arguments: None
+# Returns: None
+usage()
+{
+    echo "Usage: $0 {mount|unmount} DEVPATH (path to mtp device, e.g. /devices/pci0000:00/0000:00:1d.0/usb2/2-1/2-1.2)"
+    exit 1
+}
+
+if [[ $# -ne 2 ]]; then
+    usage
+fi
+
+# should be either 'add' or 'remove'
+readonly ACTION="$1"
+
+# should be the udev device path
+# (same as the value of the udev ENV variable DEVPATH)
+readonly DEVPATH="$2"
+
+##
+# echos the first valid mountpoint for DEVPATH and MOUNTPOINT_BASE from the
+# arrays DEVICE_NAME_MAPPINGS, MOUNTPOINT_TEMPLATES
+#
+# Globals:
+#   MOUNTPOINT_BASE
+#   DEVICE_NAME_MAPPINGS
+#   MOUNTPOINT_TEMPLATES
+#   DEVPATH
+# Arguments: None
+# Returns: None
+#
+# this function local scoping to avoid polluting the global scope with
+# dynamically declared variables
+find_mountpoint()
+(
+    OIFS=$IFS
+
+    # find all the udev device attributes and declare them in this scope
+    # line is in the form of 'VARNAME=VALUE'
+    IFS=$'\n'
+    for line in $(udevadm info -p "$DEVPATH" | grep '^E:' | cut -d' ' -f2-); do
+        varname=${line%=*}
+
+        # do not set the udev attribute as a variable if a variable of the same name already exists
+        if [ -z "${!varname-}" ]; then
+            declare -x "$line"
+        fi
+    done
+
+    # error if ID_SERIAL is unset, it should be set from a udev attribute above
+    if [ -z "${ID_SERIAL-}" ]; then
+        echo "ERROR -- no ID_SERIAL for device \'$DEVPATH\', udev device attributes may have failed to load"
+    fi
+
+    mountpoint=""
+
+    # Check if a specific mountpoint name exists for the device id_serial,
+    # selects the first match
+    for device_name_pair in "${DEVICE_NAME_MAPPINGS[@]}"; do
+        IFS=' ' read -r id_serial_pattern mountpoint_name <<< $device_name_pair
+
+        if [[ $ID_SERIAL =~ $id_serial_pattern ]]; then
+            mountpoint=$MOUNTPOINT_BASE/$mountpoint_name
+            if [[ -d "$mountpoint" ]]; then
+                mountpoint=""
+            else
+                break
+            fi
+        fi
+    done
+
+    # if no device specific mountpoint name was found, try generating one from
+    # the provided templates
+    if [[ -z "${mountpoint-}" ]]; then
+        for t in "${MOUNTPOINT_TEMPLATES[@]}"; do
+            #mp=$(eval echo "${t}")
+            mountpoint_name=$(envsubst <<< "${t}")
+            mountpoint=$MOUNTPOINT_BASE/$mountpoint_name
+            if [[ -d "$mountpoint" ]]; then
+                mountpoint=""
+            else
+                break
+            fi
+        done
+    fi
+
+    # error if no mountpoint has been found
+    if [[ -z "$mountpoint" ]]; then
+        echo "ERROR -- No suitable mountpoint found for device \'$DEVPATH\'. Either there is a name collision in the mountpoint folder \'$MOUNTPOINT_BASE\', or configuration in uma.conf is incorrect"
+        exit 1
+    fi
+
+    echo "$mountpoint"
+
+    IFS=$OIFS
+)
+
+##
+# echos a string for the go-mtpfs parameter '-dev' which matches PRODUCT. This
+# facilitates go-mtpfs mounting the correct device.
+#
+# Globals:
+#   DEVPATH
+# Arguments: None
+# Returns: None
+get_gomtpfs_dev_string() {
+    OIFS=$IFS
+    local manufacturer_id product_id serial_id
+
+    IFS='_' read -r manufacturer_id product_id serial_id <<< $(
+        # prints the value of the udev attribute 'ID_SERIAL' for PRODUCT
+        udevadm info -p "$DEVPATH" | grep 'ID_SERIAL=' | cut -d'=' -f2
+    )
+
+    # spaces need to be escaped twice because this string will be evaluated when
+    # it is used as an argument
+    echo "${manufacturer_id}\\ ${product_id}\\ ${serial_id}"
+
+    IFS=$OIFS
+}
+
+do_mount()
+{
+    debug "Mounting $DEVPATH"
+    OIFS=$IFS
+    local dev_string mountpoint error_line
+
+    dev_string=$(get_gomtpfs_dev_string)
+    mountpoint=$(find_mountpoint)
+    debug "dev_string: $dev_string, mountpoint: $mountpoint"
+
+    # TODO?: ensure erroneous mountpoints for the device do not exist
+
+    echo "$DEVPATH $mountpoint" >> "$MOUNTS_FILE"
+    mkdir -p "${mountpoint}"
+
+    # if something goes wrong and go-mtpfs closes the connection, the go-mtpfs
+    # process does not exit and the mountpoint remains in use. Workaround:
+    # This loop watches go-mtpfs for 'closing connection' errors and stops
+    # go-mtpfs if any are found.
+    # https://github.com/hanwen/go-mtpfs/blob/d6f8f3c05ce0ed31435057ec342268a0735863bb/mtp/mtp.go#L279
+    while read error_line; do
+
+        if echo "$error_line" | grep -q 'FUSE mounted'; then
+            systemd-notify --ready
+            debug "FUSE mounted"
+            continue
+        fi
+
+        # echo the go-mtpfs error to stderr for logging
+        debug "$error_line"
+
+        # if the connection has failed, unmount, cleanup and exit with error
+        if echo "$error_line" | grep -q "closing connection"; then
+            debug "unmounting inside $$"
+            do_unmount
+            exit 1
+        fi
+
+        # only read stderr from go-mtpfs
+    done < <(go-mtpfs -allow-other -dev "${dev_string}" "${mountpoint}" 2>&1 >/dev/null)
+    # systemd-notify --ready
+    # go-mtpfs -allow-other -dev "${dev_string}" "${mountpoint}"
+
+    IFS=$OIFS
+}
+
+
+do_unmount()
+{
+    debug "Unmounting $DEVPATH"
+    OIFS=$IFS
+    local mountpoint escaped_devpath
+
+    if ! cat "$MOUNTS_FILE" | grep -q "$DEVPATH"; then
+        exit 0
+    fi
+
+    mountpoint=$(cat "$MOUNTS_FILE" | grep "$DEVPATH" | head -n 1 | cut -d' ' -f2-)
+
+    # umount "${mountpoint}"
+    # systemctl kill --force $(systemd-escape -p "$mountpoint").mount
+    # umount "${mountpoint}"
+    # systemd-mount -u "${mountpoint}"
+    fusermount -u "${mountpoint}"
+
+    rmdir "${mountpoint}"
+
+    remove_mounts_file_entry "$devpath"
+
+    IFS=$OIFS
+}
+
+case "${ACTION}" in
+    mount)
+        do_mount
+        ;;
+    unmount)
+        do_unmount
+        ;;
+    *)
+        usage
+        ;;
+esac

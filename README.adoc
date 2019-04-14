@@ -1,0 +1,136 @@
+Udev-based MTP Automounter (uma)
+================================
+
+Mounts newly attached MTP devices using go-mtpfs with options for user defined mountpoints.
+
+Designed as a simple and lightweight alternative to desktop based solutions (gvfs/kio) for automounting MTP devices.
+
+
+== Installation
+
+=== Dependencies
+
+- A Linux system with systemd and udev, any mainstream linux distribution should work.
+- go-mtpfs
+- libmtp
+
+On Ubuntu go-mtpfs and libmtp can be installed with the command:
+[source,sh]
+----
+sudo apt install go-mtpfs libmtp-common
+----
+
+
+=== Install uma
+
+[source,sh]
+----
+git clone https://github.com/jmoggr/uma.git
+cd uma
+make
+sudo make install
+----
+
+
+== Use
+
+=== Mounting
+1. Plug the MTP enabled USB device in
+2. Enable USB file transfer on device
+3. Device should appear mounted in /media
+
+
+=== Unmounting
+1. Unplug the device
+
+MTP expects that the device can be removed at any time and offers no `safely remove` feature. It is up to the user to ensure that any file transfers to/from the device have completed before removing it, otherwise corrupted partially completed transfers may occur.
+
+
+=== Event Hooks
+
+By default event hooks are stored in `/opt/uma/hooks`, which contains a subdirectory for each event type:
+- `pre-mount`
+- `post-mount`
+- `post-umount`
+
+To install a hook for an event, place an executable file which will run the hook in the appropriate event type folder.
+
+
+.Notes:
+- When an event is triggered each executable in the relevant event type subdirectory is run.
+
+- Mounting will be blocked until the pre-mount hooks have exited.
+
+- By default there is a 30s time limit on the aggregate runtime of all hooks for
+  each event. This is configured by the `TimeoutStartSec` for pre-mount and post-mount hooks and `TimeoutStopSec` for the post-umount hooks
+  
+- If a hook exits with failure, no subsequent hooks will be
+  run. Hook failure does not impact the main mounting/unmounting process.
+
+- Hook executables are `source`ed, so all hooks for an event share the same
+  environment.
+
+- Systemd provides no `ExecStopPre` parameter, so there is no pre-umount event.
+  However a pre-umount event wouldn't make sense anyway because the device is simply removed.
+
+=== configuration
+
+See uma.conf
+
+== Troubleshooting
+
+=== Control Flow
+
+.On USB device addition
+
+udev::
+    * Check if the device is marked as having MTP support -- /lib/udev/rules.d/69-libmtp.rules
+    * if it is, start a uma-mount service instance for the device -- 80-uma.rules
+
+    systemd -- uma-mount@.service:::
+        ** Run pre-start script
+        script -- uma-hookrunner pre-mount::::
+            *** run pre-mount hooks -- hooks/post-mount/*
+
+        ** run main mount manager script
+        script -- uma-mount::::
+            *** find a suitable mountpoint
+            *** record the device and mountpoint -- MOUNTS_FILE
+            *** start go-mtpfs
+            *** when go-mtpfs has mounted the MTP device, signal that the service startup is complete
+
+        ** Run post-start script
+        script -- uma-hookrunner post-mount::::
+            *** run post-mount hooks -- hooks/post-mount/*
+
+
+.On USB device removal
+
+udev::
+    * if the device is MTP -- 70-mtp-remove.rules
+    * if it is, stop the mount service -- 80-uma.rules
+
+    systemd:::
+        ** run stop script -- uma-mount@.service
+
+        script -- uma-mount::::
+            *** get device mountpoint -- MOUNTS_FILE
+            *** unmount, this causes the go-mtpfs process to exit normally, which causes the service process to exit normally
+            *** delete mountpoint
+            *** delete record of device and mountpoint
+
+        ** Run post-stop script
+        script -- uma-hookrunner post-umount::::
+            *** run post-umount hooks -- hooks/post-umount/*
+
+
+.On system restart
+
+systemd::
+    ** run cleanup script -- uma-cleanup.service
+
+    script -- uma-cleanup:::
+    *** Removes remaining entries in MOUNTS_FILE and the corresponding mountpoints.
+
+=== Debugging
+

@@ -1,0 +1,48 @@
+#!/bin/bash
+
+# Removes (DEVPATH, MOUNTPOINT) entries from MOUNTS_FILE that are no
+# longer active, and, if applicable, attempts to remove the mountpoint
+# of the inactive entry
+
+# Meant to be run at startup before udev to remove mountpoints that may be left
+# over from a system crash or other abrupt halt. However this can still be run
+# at any # time to attempt to fix inconsitent states caused by errors in the 
+# uma-mount service.
+
+. /etc/opt/uma/uma.conf
+. /opt/uma/bin/uma-common.sh
+
+while read line; do
+    IFS=' ' read -r devpath mountpoint <<< $line
+
+    # if uma-mount is still active for the device then do nothing
+    if systemctl is-active --quiet "uma-mount@$(systemd-escape "$devpath").service"; then
+        echo "WARNING -- uma-mount is still active for mountpoint '$mountpoint' and device '$devpath'. Not removing."
+        continue
+    fi
+
+    # if mountpoint exists
+    if [ -d "$mountpoint" ]; then
+
+        # If the mountpoint is still active, unmount it.
+        # This should not happen in normal operation; it occurs if the uma-mount
+        # service stopped before it was able to clean up.
+        if findmnt -M "$mountpoint" >/dev/null; then
+            "Unmounting mountpoint '$mountpoint' for device '$devpath'"
+            umount "$mountpoint"
+        fi
+
+        # if mountpoint is not empty
+        if find "$target" -mindepth 1 -print -quit 2>/dev/null | grep -q .; then
+            echo "WARNING -- mountpoint for device '$devpath' exists but is non-empty. Not removing."
+        else
+            echo "Removing mountpoint '$mountpoint' for device '$devpath'"
+            rmdir "$mountpoint"
+        fi
+    fi
+
+    # remove device entry from MOUNTS_FILE
+    # this is done even if the mountpoint was not successfully removed, if it
+    # wasn't removed then it wasn't a valid mountpoint anyway.
+    remove_mounts_file_entry "$devpath"
+done < $MOUNTS_FILE

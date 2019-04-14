@@ -1,0 +1,11 @@
+[Unit]
+Description=Mount MTP Device %I
+
+[Service]
+Type=notify
+ExecStart=/opt/uma/bin/uma-mount mount %I
+ExecStop=/opt/uma/bin/uma-mount unmount %I
+
+ExecStartPre=-/opt/uma/bin/uma-hookrunner pre-mount %I
+ExecStartPost=-/opt/uma/bin/uma-hookrunner post-mount %I
+ExecStopPost=-/opt/uma/bin/uma-hookrunner post-umount %I
